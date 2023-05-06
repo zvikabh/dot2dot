@@ -22,23 +22,38 @@ def nearest_pt_indices(pts1: Sequence[complex], pts2: Sequence[complex]
   return pts1_idx, pts2_idx
 
 
-def path_to_pts(path) -> List[complex]:
+def path_to_pts(path, oversample: int) -> List[complex]:
   # TODO: include intermediate points if the path is too short.
-  return [seg.point(0) for seg in path]
+  subsamples = []
+  for i in range(oversample + 1):
+    subsamples.append(i / (oversample+1))
+  return [seg.point(subsample) for seg in path for subsample in subsamples]
 
 
-def combine_paths(paths) -> List[complex]:
+def combine_paths(paths, max_hint_len: int, oversample: int
+                  ) -> Tuple[List[complex], List[svgpathtools.Path]]:
   all_paths = []
   for path in paths:
     all_paths.extend(path.continuous_subpaths())
   print(f'SVG contains {len(all_paths)} continuous paths')
 
   if len(all_paths) == 1:
-    return path_to_pts(all_paths[0])
+    return path_to_pts(all_paths[0], oversample), []
+
+  # Move short paths to `hints`.
+  hints = []
+  i = 0
+  while i < len(all_paths):
+    if len(all_paths[i]) <= max_hint_len:
+      print(f'Path {i} contains only {len(all_paths[i])} nodes '
+            f'and will be used as a hint.')
+      hints.append(all_paths.pop(i))
+    else:
+      i += 1
 
   print(f'Attempting to combine paths.')
 
-  # First, remove non-closed paths.
+  # Remove non-closed paths.
   i = 0
   while i < len(all_paths):
     if not all_paths[i].isclosed():
@@ -47,7 +62,7 @@ def combine_paths(paths) -> List[complex]:
     else:
       i += 1
 
-  all_pts = [path_to_pts(path) for path in all_paths]
+  all_pts = [path_to_pts(path, oversample) for path in all_paths]
 
   while len(all_pts) > 1:
     # Combine two closest paths. Note that both paths are closed.
@@ -72,12 +87,11 @@ def combine_paths(paths) -> List[complex]:
 
     # Find splice point.
 
-  return all_pts[0]
+  return all_pts[0], hints
 
 
-def make_dot2dot(paths, font_scale: float, min_dist: float
-                 ) -> Tuple[str, svgpathtools.Path]:
-  pts = combine_paths(paths)
+def make_dot2dot(paths, args) -> Tuple[str, List[svgpathtools.Path]]:
+  pts, hints = combine_paths(paths, args.max_hint_len, args.oversample)
 
   min_x = min(pt.real for pt in pts)
   min_y = min(pt.imag for pt in pts)
@@ -90,7 +104,7 @@ def make_dot2dot(paths, font_scale: float, min_dist: float
   max_y += 50 * radius
   width = max_x - min_x
   height = max_y - min_y
-  font_size = int(min(width, height) * 0.01 * font_scale) + 1
+  font_size = int(min(width, height) * 0.01 * args.font_scale) + 1
 
   print(f'Combined path contains {len(pts)} points')
   print(f'Width: {width}, Height: {height}, Font size: {font_size} px')
@@ -98,7 +112,7 @@ def make_dot2dot(paths, font_scale: float, min_dist: float
   # Remove points that are too close together
   i = 0
   while i < len(pts) - 1:
-    if abs(pts[i] - pts[i + 1]) < radius * min_dist:
+    if abs(pts[i] - pts[i + 1]) < radius * args.min_dist:
       del pts[i + 1]
     else:
       i += 1
@@ -112,6 +126,11 @@ def make_dot2dot(paths, font_scale: float, min_dist: float
     f'.num {{ font: {font_size}px sans-serif; }}',
     '</style>',
   ]
+
+  for hint in hints:
+    dot2dot_svg.append(
+        f'<path d="{hint.d()}" stroke-width="{radius}" '
+        f'stroke="black" fill="none"/>')
 
   for i, pt in enumerate(pts):
     dot2dot_svg.append(
@@ -131,40 +150,52 @@ def make_dot2dot(paths, font_scale: float, min_dist: float
   for i in range(len(pts) - 1):
     solution_path.append(svgpathtools.Line(pts[i], pts[i + 1]))
 
-  return dot2dot_svg, solution_path
+  return dot2dot_svg, [solution_path] + hints
 
 
 def main():
   parser = argparse.ArgumentParser(prog='dot2dot',
                                    description='Generate Dot-to-Dot SVG files')
   parser.add_argument(
-    'filename',
-    help='Input SVG file from which the Dot-to-Dot is generated')
+      'filename',
+      help='Input SVG file from which the Dot-to-Dot is generated')
   parser.add_argument(
-    '--font_scale',
-    default=1,
-    help='Increase or decrease font size. '
-         'A floating-point value; default is 1.',
-    type=float
+      '--font_scale',
+      default=1,
+      help='Increase or decrease font size. '
+           'A floating-point value; default is 1.',
+      type=float
   )
   parser.add_argument(
-    '--min_dist',
-    default=10,
-    help='Minimum distance between consecutive points. Default is 10.',
-    type=float
+      '--min_dist',
+      default=10,
+      help='Minimum distance between consecutive points. Default is 10.',
+      type=float
   )
+  parser.add_argument(
+      '--max_hint_len',
+      default=20,
+      help='Paths shorter than this number of nodes will be kept as hints, '
+           'not combined into the main path.',
+      type=int
+  )
+  parser.add_argument(
+      '--oversample',
+      default=0,
+      help='Number of points to add between nodes to better capture curves '
+           'in the input SVG.',
+      type=int)
   args = parser.parse_args()
 
   input_fname = args.filename
   paths, _ = svgpathtools.svg2paths(input_fname)
-  dot2dot_svg, solution_path = make_dot2dot(paths, font_scale=args.font_scale,
-                                            min_dist=args.min_dist)
+  dot2dot_svg, solution_paths = make_dot2dot(paths, args)
 
   output_fname = os.path.splitext(args.filename)[0] + '_dot2dot.svg'
   with open(output_fname, 'wt') as f:
     f.write(dot2dot_svg)
   solution_fname = os.path.splitext(args.filename)[0] + '_solution.svg'
-  svgpathtools.wsvg(solution_path, filename=solution_fname)
+  svgpathtools.wsvg(solution_paths, filename=solution_fname)
 
 
 if __name__ == '__main__':
